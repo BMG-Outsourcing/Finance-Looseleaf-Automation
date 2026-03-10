@@ -229,15 +229,9 @@ class BookCategoryClassifier:
         return results
 
 
-def go_back_to_home():
-    """Reset state and return to home page."""
-    for key in ('df_original', 'deletion_queue', 'current_matches',
-                'uploaded_file', 'original_filename',
-                'processed_df', 'processed_file_data'):
-        st.session_state.pop(key, None)
-    st.session_state.deletion_queue = set()
-    st.session_state.current_matches = []
-    st.session_state.current_page = 'home'
+def go_back_to_workspace():
+    """Navigate back to workspace page."""
+    st.session_state.current_page = 'workspace'
     st.rerun()
 
 
@@ -456,8 +450,8 @@ def render_segregation_page():
     # Back button
     col_back, col_space = st.columns([1.5, 5.5])
     with col_back:
-        if st.button("← Back to Home", use_container_width=True, key="back_to_home_btn", type="secondary"):
-            go_back_to_home()
+        if st.button("← Back to Workspace", use_container_width=True, key="back_to_workspace_btn", type="secondary"):
+            go_back_to_workspace()
     
     # Check for data availability
     if st.session_state.get("processed_df") is not None:
