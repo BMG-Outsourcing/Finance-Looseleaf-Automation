@@ -13,18 +13,11 @@ CLASSIFICATION LOGIC (final):
            YES → Bank row direction decides:
                    Bank Debit  > 0  → Cash Receipts
                    Bank Credit > 0  → Cash Disbursement
-                 STOP. AR/AP are ignored when a bank line exists.
 
-  STEP 3 — No bank account found. Fall back to AR / AP signals:
-           • Trade Debtors / Accounts Receivable with Credit > 0
-             → Cash Receipts  (AR being cleared = payment collected)
-           • Accounts Payable / Trade Creditors  with Debit  > 0
-             → Cash Disbursement (AP being cleared = payment made)
+           NO  → General Journal. STOP. No further checks.
 
-  STEP 4 — No bank, no AR/AP signal → General Journal.
-
-  NOTE: Both STEP 2 and STEP 3 check the ACCOUNT column only.
-        The bank keyword match uses partial, case-insensitive matching.
+  NOTE: AR / AP are NOT used for classification at all.
+        Only bank account rows in the Account column drive the decision.
 """
 
 import streamlit as st
@@ -46,30 +39,19 @@ except ImportError:
     def load_logo(): return None
 
 
-
-# Constants — edit here to add / remove keywords
-
-BANK_KEYWORDS  = r"rcbc|westpac|macquarie"            # bank / cash accounts
-AR_KEYWORDS    = r"trade debtors|accounts receivable"
-AP_KEYWORDS    = r"accounts payable|trade creditors"
+BANK_KEYWORDS  = r"rcbc|westpac|macquarie"
 MANUAL_PATTERN = r"-\s*manual\s*$"
-
-
-
-# CLASSIFIER
 
 
 class BookCategoryClassifier:
 
     def _get_col(self, df: pd.DataFrame, candidates: list) -> str:
-        """Return first matching column name (case-insensitive)."""
         cols = {c.lower().strip(): c for c in df.columns}
         for cand in candidates:
             if cand.lower() in cols:
                 return cols[cand.lower()]
         return None
 
-    # ── reversal removal ─────────────────────────────────────────────────────
     def clean_reversals(self, df: pd.DataFrame) -> pd.DataFrame:
         cols = [self._get_col(df, ["narration"]),
                 self._get_col(df, ["description"])]
@@ -83,11 +65,9 @@ class BookCategoryClassifier:
             )
         return df[~mask].copy()
 
-    # ── main entry point ─────────────────────────────────────────────────────
     def segregate(self, df: pd.DataFrame) -> dict:
         df = self.clean_reversals(df.copy())
 
-        # Identify columns
         id_col   = self._get_col(df, ["journal id", "journal no", "id", "transaction id"])
         acc_col  = self._get_col(df, ["account", "account title", "account code"])
         dr_col   = self._get_col(df, ["debit", "dr"])
@@ -99,7 +79,6 @@ class BookCategoryClassifier:
                 "Missing required columns — need: Journal ID, Account, Debit, Credit"
             )
 
-        # ── Fix ID mismatch (ID embedded inside a date/header cell) ──────────
         if date_col:
             extracted = (
                 df[date_col].astype(str)
@@ -116,11 +95,9 @@ class BookCategoryClassifier:
         )
         df = df.dropna(subset=[id_col])
 
-        # ── Numeric amounts ───────────────────────────────────────────────────
         df[dr_col] = pd.to_numeric(df[dr_col], errors="coerce").fillna(0)
         df[cr_col] = pd.to_numeric(df[cr_col], errors="coerce").fillna(0)
 
-        # ── Drop ghost rows (blank date + blank account + zero amounts) ────────
         def _blank(s):
             return s.isna() | s.astype(str).str.strip().str.lower().isin(
                 ["", "nan", "none"]
@@ -133,74 +110,38 @@ class BookCategoryClassifier:
             )
             df = df[~ghost].copy()
 
-        # ══════════════════════════════════════════════════════════════════════
-        # ROW-LEVEL FLAGS  (account column only)
-        # ══════════════════════════════════════════════════════════════════════
         acc_lower = df[acc_col].astype(str).str.lower()
 
-        # --- Bank rows ---
         is_bank = acc_lower.str.contains(BANK_KEYWORDS, na=False)
-        df["__bank_dr"]  = is_bank & (df[dr_col] > 0)   # bank debited  → cash IN
-        df["__bank_cr"]  = is_bank & (df[cr_col] > 0)   # bank credited → cash OUT
+        df["__bank_dr"]  = is_bank & (df[dr_col] > 0)
+        df["__bank_cr"]  = is_bank & (df[cr_col] > 0)
         df["__has_bank"] = is_bank
 
-        # --- AR / AP rows (fallback only) ---
-        is_ar = acc_lower.str.contains(AR_KEYWORDS, na=False)
-        is_ap = acc_lower.str.contains(AP_KEYWORDS, na=False)
-        df["__ar_cr"]  = is_ar & (df[cr_col] > 0)   # AR cleared → cash collected
-        df["__ap_dr"]  = is_ap & (df[dr_col] > 0)   # AP cleared → cash paid
-
-        # --- Manual flag ---
         df["__manual"] = False
         if date_col:
             df["__manual"] = df[date_col].astype(str).str.contains(
                 MANUAL_PATTERN, case=False, regex=True, na=False
             )
 
-        # ══════════════════════════════════════════════════════════════════════
-        # GROUP-LEVEL PROPAGATION
-        # ══════════════════════════════════════════════════════════════════════
         g = df.groupby(id_col)
         grp_manual   = g["__manual"].transform("any")
         grp_has_bank = g["__has_bank"].transform("any")
         grp_bank_dr  = g["__bank_dr"].transform("any")
         grp_bank_cr  = g["__bank_cr"].transform("any")
-        grp_ar_cr    = g["__ar_cr"].transform("any")
-        grp_ap_dr    = g["__ap_dr"].transform("any")
 
-        # ══════════════════════════════════════════════════════════════════════
-        # BOOK ASSIGNMENT  (priority order is critical)
-        # ══════════════════════════════════════════════════════════════════════
         def _assign(idx):
-            # Priority 1: manual → always General Journal
             if grp_manual[idx]:
                 return "General Journal"
-
-            # Priority 2 & 3: bank account present → direction decides
-            if grp_has_bank[idx]:
-                if grp_bank_dr[idx]:
-                    return "Cash Receipts"          # bank debited  → money IN
-                if grp_bank_cr[idx]:
-                    return "Cash Disbursement"      # bank credited → money OUT
-                # bank row exists but zero amount → fall through to GJ
+            if not grp_has_bank[idx]:          # NO bank account → always GJ
                 return "General Journal"
-
-            # Priority 4 & 5: no bank account → AR/AP fallback
-            if grp_ar_cr[idx]:
-                return "Cash Receipts"              # AR cleared → payment received
-            if grp_ap_dr[idx]:
-                return "Cash Disbursement"          # AP cleared → payment made
-
-            # Priority 6: no signal → General Journal
-            return "General Journal"
+            if grp_bank_dr[idx]:
+                return "Cash Receipts"
+            if grp_bank_cr[idx]:
+                return "Cash Disbursement"
+            return "General Journal"           # bank row exists but $0 amount
 
         df["Book"] = df.index.to_series().apply(_assign)
-
-        # Drop helper columns
-        df = df.drop(columns=[
-            "__bank_dr", "__bank_cr", "__has_bank",
-            "__ar_cr", "__ap_dr", "__manual"
-        ])
+        df = df.drop(columns=["__bank_dr", "__bank_cr", "__has_bank", "__manual"])
 
         results = {
             "Cash Disbursement": df[df["Book"] == "Cash Disbursement"].drop(columns="Book"),
@@ -208,9 +149,6 @@ class BookCategoryClassifier:
             "General Journal":   df[df["Book"] == "General Journal"].drop(columns="Book"),
         }
 
-        # ══════════════════════════════════════════════════════════════════════
-        # SORT + TOTAL RECALCULATION + BLANK SPACERS
-        # ══════════════════════════════════════════════════════════════════════
         if date_col:
             for key, bdf in results.items():
                 if bdf.empty:
@@ -243,7 +181,6 @@ class BookCategoryClassifier:
                         grp = bdf[bdf[id_col] == j_id].copy().drop(
                             columns=["__sd", "__gd", "__rank"]
                         )
-                        # Recalculate Total row amounts
                         tot = grp[date_col].astype(str).str.contains(
                             r"^(Total|Grand Total)", case=False, na=False
                         )
@@ -264,17 +201,9 @@ class BookCategoryClassifier:
         return results
 
 
-
-# NAVIGATION
-
-
 def go_back_to_workspace():
     st.session_state.current_page = "workspace"
     st.rerun()
-
-
-
-# UI
 
 
 def render_segregation_page():
@@ -363,26 +292,22 @@ def render_segregation_page():
             <div class="rule-card-blue">
                 <strong style="color:#0c4a6e;">Cash Receipts</strong>
                 <p style="margin:.5rem 0 0 0;color:#1e40af;">
-                <b>Primary:</b> Bank account (RCBC / Westpac / Macquarie) in Account column
-                with <b>Debit &gt; 0</b> — cash was received into the bank.<br>
-                <b>Fallback (no bank line):</b> Trade Debtors / Accounts Receivable
-                with <b>Credit &gt; 0</b> — AR being cleared means payment was collected.
+                Bank account (RCBC / Westpac / Macquarie) appears in the Account column
+                AND that bank row has <b>Debit &gt; 0</b>.
                 </p>
             </div>
             <div class="rule-card-orange">
                 <strong style="color:#9a3412;">Cash Disbursement</strong>
                 <p style="margin:.5rem 0 0 0;color:#7c2d12;">
-                <b>Primary:</b> Bank account (RCBC / Westpac / Macquarie) in Account column
-                with <b>Credit &gt; 0</b> — cash was paid out of the bank.<br>
-                <b>Fallback (no bank line):</b> Accounts Payable / Trade Creditors
-                with <b>Debit &gt; 0</b> — AP being cleared means payment was made.
+                Bank account (RCBC / Westpac / Macquarie) appears in the Account column
+                AND that bank row has <b>Credit &gt; 0</b>.
                 </p>
             </div>
             <div class="rule-card-green">
                 <strong style="color:#14532d;">General Journal</strong>
                 <p style="margin:.5rem 0 0 0;color:#065f46;">
-                Entries flagged as "Manual" (date ends with "– Manual"),
-                or entries with no bank account AND no AR/AP clearing signal.
+                No bank account in the Account column, OR entry is flagged as Manual.
+                AR / AP accounts do not affect classification.
                 </p>
             </div>
         """, unsafe_allow_html=True)
@@ -390,7 +315,7 @@ def render_segregation_page():
     try:
         classifier = BookCategoryClassifier()
         segregated = classifier.segregate(df)
-        st.success("✅ Data successfully segregated")
+        st.success("Data successfully segregated")
 
         st.markdown('<div class="section-header-orange">Summary Statistics</div>',
                     unsafe_allow_html=True)
