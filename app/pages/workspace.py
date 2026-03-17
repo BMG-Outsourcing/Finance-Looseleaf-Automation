@@ -49,13 +49,13 @@ def go_to_segregation():
 
 def get_reversed_indices(df):
     """
-    Return list of row indices that belong to 'Reversed/Reversal' journal groups.
+    Return list of row indices that belong to 'Reversed/Reversal' journal groups,
+    AND the original ID groups that share the same ID number.
 
-    A journal group starts with a section-header row whose first column matches
-    "ID XXXXXX Reversed..." or "ID XXXXXX ... Reversal...".
-    Only groups whose HEADER contains Reversed/Reversal are removed — individual
-    transaction lines inside a normal group that happen to mention 'reversal'
-    (e.g. 'Unpaid/Lates Reversal') are intentionally ignored.
+    Rules:
+    1. Any group whose header matches "ID XXXXX ... Reversed/Reversal ..." is removed.
+    2. The original group also sharing "ID XXXXX" (without Reversed/Reversal) is
+       also removed — because it's the source entry being reversed.
 
     Each matched group spans from its header row through the closing 'Total' row
     and the blank separator that follows.
@@ -63,18 +63,12 @@ def get_reversed_indices(df):
     first_col = df.columns[0]
     all_indices = df.index.tolist()
 
-    expanded = set()
-
+    # --- Pass 1: Collect ALL groups and their headers ---
+    groups = []
     for pos, idx in enumerate(all_indices):
         cell_val = str(df.iloc[pos][first_col]).strip()
-
-        # Only trigger on section-header rows: "ID <number> ... Reversed/Reversal ..."
-        if re.match(r"^ID\s+\d+", cell_val, re.IGNORECASE) and \
-           re.search(r"revers(ed|al)", cell_val, re.IGNORECASE):
-
+        if re.match(r"^ID\s+\d+", cell_val, re.IGNORECASE):
             group_start_pos = pos
-
-            # Walk forward to find the closing 'Total' row (+ trailing blank)
             group_end_pos = pos
             for fwd in range(pos, min(pos + 100, len(all_indices))):
                 fwd_val = str(df.iloc[fwd][first_col]).strip().lower()
@@ -83,9 +77,36 @@ def get_reversed_indices(df):
                     if fwd + 1 < len(all_indices):
                         group_end_pos = fwd + 1
                     break
+            groups.append((group_start_pos, group_end_pos, cell_val))
 
-            for p in range(group_start_pos, group_end_pos + 1):
-                expanded.add(all_indices[p])
+    # --- Build lookup: numeric ID -> all groups sharing that ID ---
+    id_to_groups = {}
+    for (start_pos, end_pos, header) in groups:
+        m = re.match(r"^ID\s+(\d+)", header, re.IGNORECASE)
+        if m:
+            num_id = m.group(1)
+            id_to_groups.setdefault(num_id, []).append((start_pos, end_pos, header))
+
+    # --- Pass 2: Find reversed IDs, mark ALL groups with that ID for deletion ---
+    positions_to_delete = set()
+
+    for (start_pos, end_pos, header) in groups:
+        if re.search(r"revers(ed|al)", header, re.IGNORECASE):
+            # Extract the ID number from this reversed header
+            m = re.match(r"^ID\s+(\d+)", header, re.IGNORECASE)
+            if m:
+                reversed_id = m.group(1)
+                # Delete EVERY group that shares this same ID number
+                # (covers both "ID 12345 Reversed" and the original "ID 12345")
+                for (s, e, h) in id_to_groups.get(reversed_id, []):
+                    for p in range(s, e + 1):
+                        positions_to_delete.add(p)
+
+    # Convert positions back to actual DataFrame index values
+    expanded = set()
+    for p in positions_to_delete:
+        if p < len(all_indices):
+            expanded.add(all_indices[p])
 
     return sorted(list(expanded))
 
