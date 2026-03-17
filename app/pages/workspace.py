@@ -50,12 +50,15 @@ def go_to_segregation():
 def get_reversed_indices(df):
     """
     Return list of row indices that belong to 'Reversed/Reversal' journal groups,
-    AND the original ID groups that share the same ID number.
+    AND the original ID groups referenced by "Reversal of ID XXXXX".
+
+    Header format observed:
+      "ID 104308 Reversed: BMG Offshore Solutions Pty Ltd - Reversal of ID 104305"
 
     Rules:
-    1. Any group whose header matches "ID XXXXX ... Reversed/Reversal ..." is removed.
-    2. The original group also sharing "ID XXXXX" (without Reversed/Reversal) is
-       also removed — because it's the source entry being reversed.
+    1. The group whose header contains "Reversed/Reversal" is deleted (e.g. ID 104308).
+    2. If the header also contains "Reversal of ID XXXXX", that referenced ID's
+       group (e.g. ID 104305) is ALSO deleted.
 
     Each matched group spans from its header row through the closing 'Total' row
     and the blank separator that follows.
@@ -87,20 +90,28 @@ def get_reversed_indices(df):
             num_id = m.group(1)
             id_to_groups.setdefault(num_id, []).append((start_pos, end_pos, header))
 
-    # --- Pass 2: Find reversed IDs, mark ALL groups with that ID for deletion ---
-    positions_to_delete = set()
+    # --- Pass 2: Find reversed groups, collect IDs to delete ---
+    ids_to_delete = set()
 
     for (start_pos, end_pos, header) in groups:
         if re.search(r"revers(ed|al)", header, re.IGNORECASE):
-            # Extract the ID number from this reversed header
+
+            # Rule 1: Delete the reversed group itself (e.g. ID 104308)
             m = re.match(r"^ID\s+(\d+)", header, re.IGNORECASE)
             if m:
-                reversed_id = m.group(1)
-                # Delete EVERY group that shares this same ID number
-                # (covers both "ID 12345 Reversed" and the original "ID 12345")
-                for (s, e, h) in id_to_groups.get(reversed_id, []):
-                    for p in range(s, e + 1):
-                        positions_to_delete.add(p)
+                ids_to_delete.add(m.group(1))
+
+            # Rule 2: Delete the referenced original ID (e.g. "Reversal of ID 104305")
+            ref = re.search(r"reversal\s+of\s+ID\s+(\d+)", header, re.IGNORECASE)
+            if ref:
+                ids_to_delete.add(ref.group(1))
+
+    # --- Pass 3: Mark all row positions for collected IDs ---
+    positions_to_delete = set()
+    for num_id in ids_to_delete:
+        for (s, e, h) in id_to_groups.get(num_id, []):
+            for p in range(s, e + 1):
+                positions_to_delete.add(p)
 
     # Convert positions back to actual DataFrame index values
     expanded = set()
