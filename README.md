@@ -92,4 +92,4 @@ The entries within each book are sorted chronologically by their earliest transa
 
 ## Intended Use
 
-This tool is designed for the finance team at BMG Outsourcing INC. to process looseleaf journal exports efficiently — replacing what would otherwise be a manual process of hunting for reversal pairs and sorting entries into the correct books by hand.
+This tool is designed for the finance team at BMG Outsourcing INC. to process looseleaf journal exports efficiently by replacing what would otherwise be a manual process of hunting for reversal pairs and sorting entries into the correct books by hand.
